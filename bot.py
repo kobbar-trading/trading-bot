@@ -120,27 +120,36 @@ def prep(b):
     return b.dropna(subset=["vwap"])
 
 
-def signal(b, side):
-    """פריצת טווח 15 הדקות הראשונות + VWAP באותו כיוון. סטופ באמצע הטווח, יעד 2R."""
+P0 = dict(rr=2.0, vwap_exit=True, vol_mult=0, long_only=False, stop="mid")
+
+
+def signal(b, side, P=P0):
+    """פריצת טווח 15 הדקות הראשונות + VWAP באותו כיוון."""
+    if P["long_only"] and side == "short":
+        return None
     orb = b.between_time("09:30", "09:40")
     if len(orb) < 3:
         return None
     hi, lo = orb.High.max(), orb.Low.min()
-    mid = (hi + lo) / 2
+    av = b.Volume.expanding().mean().shift(1)
     for ts, r in b.between_time("09:45", "14:55").iterrows():
         up = side == "long" and r.Close > hi and r.Close > r.vwap
         dn = side == "short" and r.Close < lo and r.Close < r.vwap
-        if up or dn:
-            risk = abs(r.Close - mid)
-            if risk / r.Close < 0.002:
-                continue
-            sgn = 1 if up else -1
-            return dict(side=side, ts=ts.isoformat(), entry=float(r.Close),
-                        stop=float(mid), target=float(r.Close + sgn * C["rr"] * risk))
+        if not (up or dn):
+            continue
+        if P["vol_mult"] and not (r.Volume >= P["vol_mult"] * av[ts]):
+            continue
+        stop = (hi + lo) / 2 if P["stop"] == "mid" else (lo if up else hi)
+        risk = abs(r.Close - stop)
+        if risk / r.Close < 0.002:
+            continue
+        sgn = 1 if up else -1
+        return dict(side=side, ts=ts.isoformat(), entry=float(r.Close),
+                    stop=float(stop), target=float(r.Close + sgn * P["rr"] * risk))
     return None
 
 
-def walk(b, p):
+def walk(b, p, P=P0):
     """בודק יציאה אחרי הכניסה. מחזיר (זמן, מחיר, סיבה) או None אם הפוזיציה פתוחה."""
     lg = p["side"] == "long"
     for ts, r in b[b.index > pd.Timestamp(p["ts"])].iterrows():
@@ -148,7 +157,7 @@ def walk(b, p):
             return ts, p["stop"], "סטופ"
         if (r.High >= p["target"]) if lg else (r.Low <= p["target"]):
             return ts, p["target"], "יעד"
-        if (r.Close < r.vwap) if lg else (r.Close > r.vwap):
+        if P["vwap_exit"] and ((r.Close < r.vwap) if lg else (r.Close > r.vwap)):
             return ts, float(r.Close), "חזרה ל-VWAP"
         if ts.time() >= dt.time(15, 40):
             return ts, float(r.Close), "סוף יום"
@@ -258,34 +267,73 @@ def live():
     json.dump(st, open("state.json", "w"), ensure_ascii=False, indent=1)
 
 
-def backtest():
+VARIANTS = {
+    "א. המקור": {},
+    "ב. בלי יציאה ב-VWAP": dict(vwap_exit=False),
+    "ג. בלי VWAP, יעד פי 1.5": dict(vwap_exit=False, rr=1.5),
+    "ד. בלי VWAP, סטופ רחב": dict(vwap_exit=False, stop="far"),
+    "ה. בלי VWAP, נפח חריג": dict(vwap_exit=False, vol_mult=1.5),
+    "ו. בלי VWAP, לונג בלבד": dict(vwap_exit=False, long_only=True),
+    "ז. נפח חריג + סטופ רחב": dict(vwap_exit=False, vol_mult=1.5, stop="far"),
+}
+
+
+def load_bt():
     d = get(sp500(), "6mo", "1d")
     liq = sorted(d, key=lambda t: (d[t].Close * d[t].Volume).tail(20).mean(), reverse=True)[:C["liquid_n"]]
     d = {t: d[t] for t in liq}
     m = get(liq, "58d", "5m")
     days = sorted({x for df in m.values() for x in df.index.date})
+    return d, m, days, {day: pick(d, day) for day in days}
+
+
+def simulate(m, days, picks, P):
     rows = []
     for day in days:
-        for s, g, sd in pick(d, day):
+        for s, g, sd in picks[day]:
             if s not in m:
                 continue
             b = prep(m[s][m[s].index.date == day])
             if len(b) < 20:
                 continue
-            p = signal(b, sd)
+            p = signal(b, sd, P)
             if not p:
                 continue
-            w = walk(b, p)
+            w = walk(b, p, P)
             ts, px, why = w if w else (b.index[-1], float(b.Close.iloc[-1]), "סוף יום")
             pct, r = result(p, px)
             rows.append(dict(date=str(day), symbol=s, side=sd, entry=p["entry"],
                              exit=px, reason=why, pct=pct, r=r))
-    if not rows:
-        notify("בדיקה לאחור: לא נמצאו עסקאות.")
+    return pd.DataFrame(rows)
+
+
+def brief(df):
+    if len(df) == 0:
+        return "אין עסקאות"
+    w, l = df[df.pct > 0], df[df.pct <= 0]
+    pf = w.pct.sum() / abs(l.pct.sum()) if len(l) and l.pct.sum() != 0 else float("inf")
+    return f"{len(df)} עסקאות | {len(w) / len(df) * 100:.0f}% הצלחה | {df.pct.mean():+.2f}% לעסקה | PF {pf:.2f}"
+
+
+def backtest():
+    """משווה גרסאות. אימון: 40 הימים הראשונים. מבחן: הימים שאחריהם."""
+    d, m, days, picks = load_bt()
+    if len(days) < 20:
+        notify("אין מספיק נתונים לבדיקה.")
         return
-    df = pd.DataFrame(rows)
-    df.to_csv("backtest_results.csv", index=False)
-    notify(summary(df, f"בדיקה לאחור, {len(days)} ימי מסחר, {C['liquid_n']} המניות הנזילות"))
+    cut = str(days[min(40, len(days) - 10)])
+    out, allrows = [f"🔬 השוואת גרסאות, {len(days)} ימי מסחר\nאימון: עד {cut} | מבחן: מ-{cut}\nPF מעל 1 = רווח"], []
+    for name, ch in VARIANTS.items():
+        df = simulate(m, days, picks, {**P0, **ch})
+        if len(df):
+            df["variant"] = name
+            allrows.append(df)
+            out.append(f"{name}\nאימון: {brief(df[df.date < cut])}\nמבחן: {brief(df[df.date >= cut])}")
+        else:
+            out.append(f"{name}\nאין עסקאות")
+    if allrows:
+        pd.concat(allrows).to_csv("backtest_results.csv", index=False)
+    notify("\n\n".join(out))
 
 
 if __name__ == "__main__":
