@@ -12,6 +12,10 @@ C = dict(top_n=10, min_gap=0.015, min_price=10, min_vol=1_000_000,
 FALLBACK = "AAPL MSFT NVDA AMZN GOOGL META TSLA AMD AVGO NFLX JPM BAC XOM COST".split()
 
 
+def token():
+    return (os.getenv("TELEGRAM_TOKEN") or "").strip()
+
+
 def chat_id():
     """מזהה הצ'אט: מהסוד, מקובץ שמור, או מההודעה האחרונה ששלחת לבוט."""
     c = os.getenv("TELEGRAM_CHAT_ID")
@@ -20,7 +24,7 @@ def chat_id():
     if os.path.exists("chat_id.txt"):
         return open("chat_id.txt").read().strip()
     try:
-        r = requests.get(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN')}/getUpdates",
+        r = requests.get(f"https://api.telegram.org/bot{token()}/getUpdates",
                          timeout=20).json()
         for u in reversed(r.get("result", [])):
             if u.get("message"):
@@ -34,7 +38,7 @@ def chat_id():
 
 def notify(msg):
     print(msg)
-    tok = os.getenv("TELEGRAM_TOKEN")
+    tok = token()
     chat = chat_id() if tok else None
     if tok and not chat:
         print("אין מזהה צ'אט: שלח הודעה לבוט בטלגרם ואז הרץ שוב")
@@ -178,6 +182,19 @@ def log_trade(day, s, p, ts, px, why):
     return pct, r
 
 
+def test():
+    tok = token()
+    print("אורך הטוקן:", len(tok), "| יש נקודתיים:", ":" in tok)
+    try:
+        me = requests.get(f"https://api.telegram.org/bot{tok}/getMe", timeout=20).json()
+        print("getMe:", me.get("ok"), me.get("description", ""), (me.get("result") or {}).get("username", ""))
+        up = requests.get(f"https://api.telegram.org/bot{tok}/getUpdates", timeout=20).json()
+        print("getUpdates:", up.get("ok"), up.get("description", ""), "| הודעות:", len(up.get("result", [])))
+    except Exception as e:
+        print("שגיאת רשת:", e)
+    notify("✅ הבוט מחובר ועובד")
+
+
 def live():
     now = dt.datetime.now(NY)
     today, t = now.date(), now.time()
@@ -272,4 +289,4 @@ def backtest():
 
 
 if __name__ == "__main__":
-    {"live": live, "backtest": backtest, "test": lambda: notify("✅ הבוט מחובר ועובד")}[sys.argv[1] if len(sys.argv) > 1 else "live"]()
+    {"live": live, "backtest": backtest, "test": test}[sys.argv[1] if len(sys.argv) > 1 else "live"]()
