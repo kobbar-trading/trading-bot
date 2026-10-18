@@ -230,7 +230,7 @@ def live():
                 continue
             if len(st["pos"]) >= C["max_pos"]:
                 break
-            p = signal(bars[s], w["side"])
+            p = signal(bars[s], w["side"], LIVE_P)
             if not p:
                 continue
             st["done"].append(s)
@@ -242,7 +242,7 @@ def live():
         for s, p in list(st["pos"].items()):
             if s not in bars or len(bars[s]) < 2:
                 continue
-            res = walk(bars[s], p)
+            res = walk(bars[s], p, LIVE_P)
             if res:
                 ts, px, why = res
                 pct, r = log_trade(str(today), s, p, ts, px, why)
@@ -276,6 +276,10 @@ VARIANTS = {
     "ו. בלי VWAP, לונג בלבד": dict(vwap_exit=False, long_only=True),
     "ז. נפח חריג + סטופ רחב": dict(vwap_exit=False, vol_mult=1.5, stop="far"),
 }
+
+
+# גרסת הדמה הקדימה: לא משנים אותה במשך כל תקופת הניסוי
+LIVE_P = {**P0, **VARIANTS["ה. בלי VWAP, נפח חריג"]}
 
 
 def load_bt():
